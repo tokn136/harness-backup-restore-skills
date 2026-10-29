@@ -1,0 +1,32 @@
+# Paths to back up, relative to your home folder. One per line.
+# Lines starting with "-" are exclude patterns (rsync syntax).
+# Missing paths are skipped.
+
+.claude
+.claude.json
+
+Library/Application Support/Claude/claude_desktop_config.json
+Library/Application Support/Claude/config.json
+Library/Application Support/Claude/ccd-session-presets.json
+Library/Application Support/Claude/git-worktrees.json
+Library/Application Support/Claude/mcp-user-tool-toggles.json
+Library/Application Support/Claude/cowork-enabled-cli-ops.json
+Library/Application Support/Claude/extensions-blocklist.json
+Library/Application Support/Claude/window-state.json
+Library/Application Support/Claude/claude-code-sessions
+Library/Application Support/Claude/local-agent-mode-sessions
+Library/Application Support/Claude/scratch-workspaces
+Library/Application Support/Claude/git-shadow
+Library/Application Support/Claude/spaces-present
+Library/Preferences/com.anthropic.claudefordesktop.plist
+
+# Temporary Claude Code data that belongs to running processes
+- .claude/sessions/
+- .claude/session-env/
+- .claude/shell-snapshots/
+- .claude/debug/
+- .claude/telemetry/
+- .claude/cache/
+- .claude/.last-cleanup
+- .DS_Store
+- node_modules/
