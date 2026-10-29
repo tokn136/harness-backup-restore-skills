@@ -6,6 +6,7 @@ Claude skills that back up the local data of AI coding tools into one encrypted 
 |---|---|---|
 | [`claude-migrate`](skills/claude-migrate/SKILL.md) | Claude desktop app + Claude Code | ✅ Ready |
 | [`codex-mac-migration`](skills/codex-mac-migration/SKILL.md) | Codex desktop app + CLI | ✅ Ready |
+| [`vscode-mac-migration`](skills/vscode-mac-migration/SKILL.md) | VS Code (+ Insiders), Copilot chats, Copilot CLI | ✅ Ready |
 
 ## Projects in git or the cloud
 
@@ -15,7 +16,9 @@ Projects that already live somewhere else are linked, not copied:
 - **Git repositories** with everything committed and pushed are cloned back to the same path and branch. Local-only ignored files like `.env` are kept. Rebuildable folders like `node_modules` are skipped.
 - **Repositories with uncommitted, unpushed or stashed work** are flagged before the backup so you can commit and push first. If you don't, they're copied as files.
 
-The Codex skill does this today. The Claude skill doesn't back up project folders yet.
+The Codex and VS Code skills do this. The Claude skill doesn't back up project folders yet.
+
+The VS Code skill also re-files Copilot chat history under the IDs VS Code uses on the new Mac. Otherwise chats disappear when a project folder is re-created.
 
 ## Install
 
