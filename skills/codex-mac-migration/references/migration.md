@@ -61,6 +61,29 @@ source. Verify/restore accept `.age` and prompt using age in Terminal. To retrie
 the embedded helper from an encrypted archive before the skill is installed,
 decrypt with `age -d -o backup.tar.gz backup.tar.gz.age`, then follow RESTORE.md.
 
+## Linked projects (git and cloud folders)
+
+Inventory sorts every discovered project folder into one of three groups:
+
+| Group | Rule | In the archive | On restore |
+|---|---|---|---|
+| Cloud | Under `~/Library/CloudStorage/*` or `~/Library/Mobile Documents/*` | Not copied | Checked; reported as waiting until the sync service has it |
+| Git, linked | Has a remote, clean working tree, all branches and HEAD contained in remote-tracking refs, no stashes, not tied to Codex worktrees | Only git-ignored local files, minus rebuildable folders | Cloned to the (mapped) path and branch, extra remotes re-added, then local files restored |
+| Copied | Everything else, including repositories in `needs_commit_or_push` | Full copy with `.git` | Restored as files |
+
+"Pushed" is based on the last fetch. After cloning, restore checks that the
+old HEAD commit exists in the clone and warns if it doesn't (e.g. force-pushed
+or deleted branch). A git repository inside a cloud folder is treated as cloud.
+Folders passed with `--include` are always copied.
+
+```bash
+python3 "$migration_script" relink /path/to/backup.tar.gz            # status
+python3 "$migration_script" relink /path/to/backup.tar.gz --apply    # clone missing repos
+```
+
+Rollback moves clones made by restore/relink aside to `.after-migration-*`
+folders; it never deletes them.
+
 ## Restoration behavior
 
 Restoration verifies archive entries and rejects traversal, duplicate paths,

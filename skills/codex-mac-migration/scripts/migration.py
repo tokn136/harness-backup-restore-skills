@@ -19,7 +19,14 @@ import tarfile
 import tempfile
 import uuid
 
-FORMAT = 1
+FORMAT = 2  # 2 adds "linked" projects (git remotes / cloud folders) that are re-wired, not copied
+# Folders synced by OneDrive, Dropbox, Google Drive, Box (CloudStorage) and iCloud Drive.
+CLOUD_PARENTS = ("Library/CloudStorage", "Library/Mobile Documents")
+# Git-ignored folders that tools rebuild on their own; not worth carrying in the archive.
+REBUILDABLE = {"node_modules", ".venv", "venv", "env", "__pycache__", ".pytest_cache", ".mypy_cache",
+               ".ruff_cache", ".tox", ".nox", "dist", "build", ".next", ".nuxt", ".svelte-kit", ".turbo",
+               ".parcel-cache", ".cache", "target", ".gradle", "DerivedData", "Pods", "coverage",
+               ".DS_Store", ".eggs", "bower_components", ".terraform"}
 APP_DIRS = (
     "Library/Application Support/Codex",
     "Library/Application Support/com.openai.codex",
@@ -61,6 +68,13 @@ Extract only the helpers into a new, empty folder (do not unpack payload yoursel
 The restore command previews by default. After checking the destinations:
 
     python3 migration.py restore /path/to/codex-backup.tar.gz --apply
+
+Linked projects are not in the archive. Git projects are cloned from their
+remote during restore (needs access, e.g. `gh auth login` or an SSH key) and
+their local-only files such as .env are put back. Cloud folders (OneDrive,
+iCloud, Dropbox, ...) arrive when you sign in to that service. Check or retry:
+
+    python3 migration.py relink /path/to/codex-backup.tar.gz [--apply]
 
 Existing destination roots are moved aside, never merged. A rollback journal
 is printed and saved in ~/.codex-migration-transactions. Keep it and the sibling
@@ -183,6 +197,86 @@ def schema(con):
             for (name,) in con.execute("SELECT name FROM sqlite_master WHERE type='table'")}
 
 
+def cloud_provider(path, home):
+    """Name of the sync service if path lives in a cloud-synced folder, else None."""
+    real = Path(os.path.realpath(path))
+    for base in CLOUD_PARENTS:
+        parent = Path(os.path.realpath(home / base))
+        if within(real, parent) and real != parent:
+            name = real.relative_to(parent).parts[0]
+            if base.endswith("Mobile Documents"):
+                return "iCloud Drive" if name == "com~apple~CloudDocs" else "iCloud (" + name + ")"
+            return name
+    return None
+
+
+def git_out(repo, *args):
+    env = dict(os.environ, GIT_OPTIONAL_LOCKS="0", GIT_TERMINAL_PROMPT="0")
+    p = subprocess.run(["git", "-C", str(repo), *args], capture_output=True, text=True, timeout=120, env=env)
+    if p.returncode:
+        raise RuntimeError(p.stderr.strip() or "git failed")
+    return p.stdout
+
+
+def git_state(root, worktree_commons):
+    """Describe the git repository containing root, or None if it is not in one.
+
+    Read-only. "Pushed" is judged from local remote-tracking refs (last fetch)."""
+    if not shutil.which("git") or not root.is_dir() or root.is_symlink():
+        return None
+    try:
+        top_real = Path(git_out(root, "rev-parse", "--show-toplevel").strip())
+        rel = Path(os.path.realpath(root)).relative_to(top_real)
+    except (RuntimeError, OSError, ValueError, subprocess.TimeoutExpired):
+        return None
+    top = root
+    for _ in rel.parts:
+        top = top.parent
+    state = {"toplevel": str(top), "issues": [], "remotes": {}, "ignored": []}
+    try:
+        git_dir = Path(os.path.realpath(top / git_out(top, "rev-parse", "--git-dir").strip()))
+        common = Path(os.path.realpath(top / git_out(top, "rev-parse", "--git-common-dir").strip()))
+        for line in git_out(top, "remote", "-v").splitlines():
+            parts = line.split()
+            if len(parts) == 3 and parts[2] == "(fetch)":
+                state["remotes"][parts[0]] = parts[1]
+        try:
+            state["head"] = git_out(top, "rev-parse", "HEAD").strip()
+        except RuntimeError:
+            state["issues"].append("Repository has no commits yet")
+            return state
+        state["branch"] = git_out(top, "rev-parse", "--abbrev-ref", "HEAD").strip()
+        changes = [x for x in git_out(top, "status", "--porcelain=v1", "--untracked-files=normal").splitlines() if x]
+        stashes = [x for x in git_out(top, "stash", "list").splitlines() if x]
+        if git_dir != common:
+            state["issues"].append("Is a linked git worktree; copied as files")
+        if str(top) in worktree_commons:
+            state["issues"].append("Has linked worktrees used by Codex; copied as files")
+        if not state["remotes"]:
+            state["issues"].append("No remote (e.g. GitHub) configured; push it somewhere to avoid copying it")
+        if changes:
+            state["issues"].append("%d uncommitted or untracked change(s)" % len(changes))
+            state["changes"] = changes[:50]
+        if state["remotes"]:
+            unpushed = int(git_out(top, "rev-list", "--count", "--branches", "HEAD", "--not", "--remotes").strip() or 0)
+            if unpushed:
+                state["issues"].append("%d commit(s) not pushed" % unpushed)
+                state["unpushed_branches"] = [
+                    b for b in git_out(top, "for-each-ref", "--format=%(refname:short)", "refs/heads").split()
+                    if int(git_out(top, "rev-list", "--count", b, "--not", "--remotes").strip() or 0)]
+        if stashes:
+            state["issues"].append("%d stash(es), which exist only on this Mac" % len(stashes))
+        if not state["issues"]:
+            out = git_out(top, "ls-files", "--others", "--ignored", "--exclude-standard", "--directory", "-z")
+            for item in out.split("\0"):
+                item = item.rstrip("/")
+                if item and not any(part in REBUILDABLE for part in Path(item).parts) and not item.endswith(".pyc"):
+                    state["ignored"].append(item)
+    except (RuntimeError, OSError, ValueError, subprocess.TimeoutExpired) as exc:
+        state["issues"].append("Could not read git state: " + str(exc))
+    return state
+
+
 def inventory(home, codex_home, includes=()):
     """Read only discovery. Never read credentials or message bodies for reporting."""
     roots = {}
@@ -260,6 +354,7 @@ def inventory(home, codex_home, includes=()):
 
     # A managed worktree can be nested under CODEX_HOME rather than a discovered root.
     scanned = set()
+    worktree_commons = set()
     while True:
         pending = [r for r in collapsed() if str(r) not in scanned]
         if not pending:
@@ -281,15 +376,50 @@ def inventory(home, codex_home, includes=()):
                     commonfile = admin / "commondir"
                     if commonfile.exists():
                         common = absolute(admin / commonfile.read_text().strip())
-                        add(common.parent if common.name == ".git" else common,
-                            "Git common repository for linked worktree")
+                        repo = common.parent if common.name == ".git" else common
+                        worktree_commons.add(str(repo))
+                        add(repo, "Git common repository for linked worktree")
                     elif not admin.exists():
                         missing.append({"path": str(admin), "reason": "Missing Git worktree administration"})
-    selected = collapsed()
+    # Projects already stored elsewhere (cloud folder, or git remote with everything pushed)
+    # are recorded and re-wired on restore instead of copied.
+    linked, attention, keep, extras, seen_repos = [], [], [], [], set()
+    explicit = {str(absolute(v)) for v in includes}
+    app_paths = {home / rel for rel in APP_DIRS} | {home / ".agents/skills", home / "Documents/Codex"}
+    for root in collapsed():
+        if within(root, codex_home) or root in app_paths or str(root) in explicit:
+            keep.append(root)
+            continue
+        provider = cloud_provider(root, home)
+        if provider:
+            linked.append({"kind": "cloud", "path": str(root), "provider": provider,
+                           "reasons": sorted(roots.get(str(root), []))})
+            continue
+        state = git_state(root, worktree_commons)
+        if state is None:
+            keep.append(root)
+            continue
+        if state["issues"]:
+            attention.append({"path": str(root), **{k: v for k, v in state.items() if k != "ignored"}})
+            keep.append(root)
+            continue
+        top = Path(state["toplevel"])
+        if str(top) in seen_repos:
+            continue
+        seen_repos.add(str(top))
+        linked.append({"kind": "git", "path": str(top), "remotes": state["remotes"], "branch": state["branch"],
+                       "head": state["head"], "local_only_files": state["ignored"],
+                       "reasons": sorted(roots.get(str(root), []))})
+        for item in state["ignored"]:
+            p = top / item
+            roots.setdefault(str(p), set()).add("Git-ignored file that exists only on this Mac")
+            extras.append(p)
+    selected = keep + [p for p in extras if not any(within(p, k) for k in keep)]
     if (home / ".lima").exists():
         dependencies.append("Lima VMs exist at " + str(home / ".lima") + "; VM disks/configuration require separate migration or explicit --include while the VM is stopped.")
     return {"format": FORMAT, "source_home": str(home), "codex_home": str(codex_home),
             "app_version": app_version(), "roots": [str(p) for p in selected],
+            "linked": linked, "attention": attention,
             "discovered": {p: sorted(v) for p, v in roots.items()},
             "missing": missing, "warnings": warnings, "dependencies": dependencies,
             "databases": databases, "notes": NOTES}
@@ -469,6 +599,8 @@ def backup(args):
         output.with_name(output.name + ".sha256").write_text(checksum + "  " + output.name + "\n")
         summary = {"archive": str(output), "bytes": output.stat().st_size, "sha256": checksum,
                    "entries": len(entries), "completeness": manifest["completeness"],
+                   "linked_projects_not_copied": [linked_label(x) for x in report["linked"]],
+                   "copied_because_not_committed_or_pushed": [a["path"] + ": " + "; ".join(a["issues"]) for a in report["attention"]],
                    "missing": report["missing"], "external_symlinks": external, "omissions": omissions}
         write_json(output.with_name(output.name + ".report.json"), summary)
         print(json.dumps(summary, indent=2))
@@ -515,7 +647,7 @@ def verify_plain(path):
         if "manifest.json" not in members or not members["manifest.json"].isfile() or members["manifest.json"].size > 256 * 1024 * 1024:
             fail("Missing or oversized manifest.")
         manifest = json.load(tf.extractfile(members["manifest.json"]))
-        if manifest.get("format") != FORMAT:
+        if manifest.get("format") not in (1, FORMAT):
             fail("Unsupported backup format.")
         for name in ("migration.py", "RESTORE.md"):
             if name not in members or not members[name].isfile():
@@ -706,6 +838,87 @@ def sync_preferences(destinations):
     return warnings
 
 
+def linked_label(item):
+    if item["kind"] == "cloud":
+        return item["path"] + "  (" + item["provider"] + ")"
+    url = item["remotes"].get("origin") or next(iter(item["remotes"].values()))
+    return item["path"] + "  (git: " + url + ", branch " + item["branch"] + ")"
+
+
+def linked_status(manifest, pairs):
+    """Where each linked project goes on this Mac and what needs to happen."""
+    items = []
+    for item in manifest.get("linked", []):
+        dest = absolute(mapped(item["path"], pairs))
+        st = dict(item, destination=str(dest))
+        if item["kind"] == "cloud":
+            st["action"] = "present" if dest.exists() else "waiting for " + item["provider"] + " to sync"
+        elif not dest.exists() or (dest.is_dir() and not any(dest.iterdir())):
+            st["action"] = "clone"
+        else:
+            try:
+                urls = set(git_out(dest, "remote", "-v").split())
+                st["action"] = "present" if urls & set(item["remotes"].values()) else "conflict"
+            except (RuntimeError, OSError, subprocess.TimeoutExpired):
+                st["action"] = "conflict"
+        items.append(st)
+    return items
+
+
+def clone_linked(items, journal, journal_path):
+    """Clone git projects that are not on this Mac yet. Prompts for credentials if git needs them."""
+    for st in items:
+        if st["kind"] != "git" or st["action"] != "clone":
+            continue
+        if not shutil.which("git"):
+            fail("git is needed to re-create linked projects. Install it with: xcode-select --install")
+        dest = Path(st["destination"])
+        name = "origin" if "origin" in st["remotes"] else next(iter(st["remotes"]))
+        cmd = ["git", "clone", "--origin", name]
+        if st["branch"] != "HEAD":
+            cmd += ["--branch", st["branch"]]
+        print("Cloning " + st["remotes"][name] + " -> " + str(dest), flush=True)
+        if subprocess.run(cmd + [st["remotes"][name], str(dest)]).returncode:
+            fail("Could not clone %s. Check access (for GitHub: gh auth login, or an SSH key), then run this again."
+                 % st["remotes"][name])
+        journal.setdefault("cloned", []).append(str(dest))
+        write_json(journal_path, journal)
+        for other, url in st["remotes"].items():
+            if other != name:
+                git_out(dest, "remote", "add", other, url)
+        try:
+            git_out(dest, "cat-file", "-e", st["head"] + "^{commit}")
+            if st["branch"] == "HEAD":
+                git_out(dest, "checkout", "--detach", st["head"])
+        except RuntimeError:
+            journal.setdefault("warnings", []).append(
+                "%s: the remote does not have commit %s that was checked out on the old Mac" % (dest, st["head"][:12]))
+        st["action"] = "cloned"
+
+
+def relink(args):
+    """Check cloud folders and clone missing git projects; safe to run again later."""
+    pairs = mappings(args.map)
+    with Archive(args.archive) as archive:
+        manifest = verify_plain(archive)
+    items = linked_status(manifest, pairs)
+    print(json.dumps({"dry_run": not args.apply, "linked_projects": items}, indent=2), flush=True)
+    if not args.apply:
+        return
+    if any(st["action"] == "conflict" for st in items):
+        fail("A folder exists that is not a clone of the expected repository. Move it aside or use --map.")
+    txid = dt.datetime.now().strftime("%Y%m%d-%H%M%S-") + uuid.uuid4().hex[:8]
+    journal_path = Path.home() / ".codex-migration-transactions" / (txid + "-relink.json")
+    journal = {"format": FORMAT, "id": txid, "status": "relinking", "operations": [], "created_parents": []}
+    write_json(journal_path, journal)
+    clone_linked(items, journal, journal_path)
+    journal["status"] = "complete"
+    write_json(journal_path, journal)
+    for warning in journal.get("warnings", []):
+        print("WARNING: " + warning)
+    print("Linked projects checked. Journal: " + str(journal_path))
+
+
 def restore(args):
     pairs = mappings(args.map)
     with Archive(args.archive) as archive:
@@ -723,8 +936,10 @@ def restore(args):
                 fail("Restore destinations overlap after mapping.")
         current = app_version()
         mismatch = current and manifest.get("app_version") and current != manifest["app_version"]
+        linked = linked_status(manifest, pairs)
         preview = {"dry_run": not args.apply, "source_app": manifest.get("app_version"), "installed_app": current,
                    "version_mismatch": bool(mismatch), "completeness": manifest["completeness"],
+                   "linked_projects": [{"path": st["destination"], "source": linked_label(st), "action": st["action"]} for st in linked],
                    "destinations": [{"path": str(p), "existing_will_be_moved_aside": p.exists() or p.is_symlink()} for p in destinations],
                    "mappings": pairs, "notes": manifest["notes"], "external_symlinks": manifest["external_symlinks"]}
         print(json.dumps(preview, indent=2), flush=True)
@@ -733,6 +948,10 @@ def restore(args):
         require_stopped()
         if mismatch and not args.accept_version_mismatch:
             fail("Install the original Codex version, or inspect compatibility and explicitly use --accept-version-mismatch.")
+        conflicts = [st["destination"] for st in linked if st["action"] == "conflict"]
+        if conflicts:
+            fail("These folders exist but are not clones of the expected repository. Move them aside or use --map: "
+                 + ", ".join(conflicts))
         if any(within(absolute(args.archive), d) for d in destinations):
             fail("Move the archive outside the restore destinations first.")
         txid = dt.datetime.now().strftime("%Y%m%d-%H%M%S-") + uuid.uuid4().hex[:8]
@@ -743,6 +962,8 @@ def restore(args):
         write_json(journal_path, journal)
         staged = []
         try:
+            # Clone linked repositories first: local-only files are restored into them afterwards.
+            clone_linked(linked, journal, journal_path)
             for i, dest in enumerate(destinations):
                 missing = []
                 parent = dest.parent
@@ -821,11 +1042,15 @@ def restore(args):
                 op["phase"] = "installed"
                 write_json(journal_path, journal)
             journal["status"] = "complete"
-            journal["warnings"] = sync_preferences(destinations)
+            journal["warnings"] = journal.get("warnings", []) + sync_preferences(destinations)
             write_json(journal_path, journal)
             print("Restored. Rollback journal: " + str(journal_path))
             for warning in journal["warnings"]:
                 print("WARNING: " + warning)
+            for st in linked:
+                if st["kind"] == "cloud" and st["action"] != "present":
+                    print("WAITING: %s is not on this Mac yet. Sign in to %s and let it sync; "
+                          "check later with the relink command." % (st["destination"], st["provider"]))
             if pairs:
                 print("Paths remapped in %d known files. Run scan-references with the old path before launching Codex." % len(journal["remapped_files"]))
         except BaseException:
@@ -866,6 +1091,11 @@ def rollback(args):
             fail("Original rollback copy is missing: " + str(saved))
         op["rolled_back"] = True
         write_json(path, journal)
+    for cloned in reversed(journal.get("cloned", [])):
+        dest = Path(cloned)
+        moved = dest.with_name(dest.name + ".after-migration-" + journal["id"])
+        if (dest.exists() or dest.is_symlink()) and not (moved.exists() or moved.is_symlink()):
+            os.replace(dest, moved)
     journal["status"] = "rolled_back"
     journal["warnings"] = sync_preferences([Path(op["destination"]) for op in journal["operations"]])
     write_json(path, journal)
@@ -913,6 +1143,10 @@ def parser():
     sp.add_argument("--map", action="append", default=[])
     sp.add_argument("--apply", action="store_true")
     sp.add_argument("--accept-version-mismatch", action="store_true")
+    sp = sub.add_parser("relink", help="Check cloud folders and clone missing git projects again later")
+    sp.add_argument("archive")
+    sp.add_argument("--map", action="append", default=[])
+    sp.add_argument("--apply", action="store_true")
     sp = sub.add_parser("rollback")
     sp.add_argument("journal")
     sp.add_argument("--apply", action="store_true")
@@ -935,8 +1169,11 @@ def main():
                 report.update(deep_scan_complete=False, deep_scan_error=str(exc))
         write_json(absolute(args.output), report)
         print(json.dumps({"report": str(absolute(args.output)), "roots": len(report["roots"]),
+                          "linked_projects_not_copied": [linked_label(x) for x in report["linked"]],
+                          "needs_commit_or_push": [{"path": a["path"], "issues": a["issues"]} for a in report["attention"]],
                           "missing": len(report["missing"]), "warnings": report["warnings"],
-                          "deep_scan_error": report.get("deep_scan_error")}, indent=2))
+                          "uncompressed_bytes": report.get("uncompressed_bytes"),
+                          "deep_scan_error": report.get("deep_scan_error")}, indent=2, ensure_ascii=False))
         if args.deep and not report["deep_scan_complete"]:
             sys.exit(2)
     elif args.command == "backup":
@@ -948,6 +1185,8 @@ def main():
                           "created_at": manifest["created_at"], "completeness": manifest["completeness"]}, indent=2))
     elif args.command == "restore":
         restore(args)
+    elif args.command == "relink":
+        relink(args)
     elif args.command == "rollback":
         rollback(args)
     else:

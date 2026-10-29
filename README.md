@@ -5,6 +5,17 @@ Claude skills that back up the local data of AI coding tools into one encrypted 
 | Skill | Tool | Status |
 |---|---|---|
 | [`claude-migrate`](skills/claude-migrate/SKILL.md) | Claude desktop app + Claude Code | ✅ Ready |
+| [`codex-mac-migration`](skills/codex-mac-migration/SKILL.md) | Codex desktop app + CLI | ✅ Ready |
+
+## Projects in git or the cloud
+
+Projects that already live somewhere else are linked, not copied:
+
+- **Cloud folders** (OneDrive, Dropbox, Google Drive, iCloud Drive) arrive on the new Mac when you sign in to that service.
+- **Git repositories** with everything committed and pushed are cloned back to the same path and branch. Local-only ignored files like `.env` are kept. Rebuildable folders like `node_modules` are skipped.
+- **Repositories with uncommitted, unpushed or stashed work** are flagged before the backup so you can commit and push first. If you don't, they're copied as files.
+
+The Codex skill does this today. The Claude skill doesn't back up project folders yet.
 
 ## Install
 

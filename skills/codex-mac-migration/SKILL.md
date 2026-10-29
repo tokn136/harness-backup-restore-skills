@@ -17,32 +17,46 @@ for command examples, dependencies, path changes, and recovery.
    version, and dependency notes. Reports contain paths and schema/count metadata,
    not chat messages or credential values. Resolve errors before claiming full
    coverage. An incomplete deep scan exits with code 2 and retains its report.
-2. Include discovered project folders and Git common repositories. The helper
-   preserves ignored/untracked files, Git data, archived chats, attachments,
-   skills/plugins, app preferences/browser state, projectless outputs, local
-   memories and automation files present under Codex home. It detects the app by
-   bundle identifier, including installations named ChatGPT.app.
-3. For external symlink targets, add explicit `--include` arguments if the user
+2. Show the user how each project will move. Projects that already live
+   somewhere else are linked, not copied (`linked_projects_not_copied`):
+   - Cloud folders (OneDrive, Dropbox, Google Drive under `~/Library/CloudStorage`,
+     iCloud Drive): the sync service brings them to the new Mac.
+   - Git repositories with a remote where everything is committed and pushed and
+     nothing is stashed: restore clones them back to the same path and branch.
+     Git-ignored files that exist only locally (e.g. `.env`) stay in the archive.
+     Rebuildable folders such as `node_modules` and `.venv` are skipped.
+   Everything else is copied as files, including Codex home, app data and
+   projectless outputs. The app is detected by bundle identifier, including
+   installations named ChatGPT.app.
+3. Go through `needs_commit_or_push` with the user, one repository at a time.
+   Show `git status` / unpushed branches and offer to commit and push so the
+   project can be linked instead of copied. Commit, push or create a remote only
+   after the user agrees for that repository, with a commit message they accept.
+   Stashes need to be applied and committed, or kept by copying. If the user
+   declines, the repository is copied as files, so nothing is lost. Run
+   inventory again after changes. Linking uses the last fetch: run `git fetch`
+   first if the remote may have changed.
+4. For external symlink targets, add explicit `--include` arguments if the user
    wants the dependencies migrated. Treat remote hosts, Lima VMs, cloud-hosted
    projects, and Keychain as separately reported dependencies. Download cloud
    placeholders before backup. Permission/read failures stop the backup.
-4. Choose an archive folder completely outside the discovered source roots,
+5. Choose an archive folder completely outside the discovered source roots,
    normally `~/Documents/Codex Migration Backups`. Provide a reviewable Terminal
    command or launcher. Codex must be completely quit before the helper runs;
    include Codex CLI/server/helper processes and pause other source-file writers.
    Do not quit the active app before handing off the command and instructions.
    Process checks can be blocked by the app sandbox; run in macOS Terminal rather
    than weakening the check. Do not claim a live in-app copy is a consistent backup.
-5. Run `backup --output <archive.tar.gz>`, or add `--encrypt` with an `.age` output
+6. Run `backup --output <archive.tar.gz>`, or add `--encrypt` with an `.age` output
    suffix. Encryption prompts in Terminal; never request a passphrase in chat or
    put it in arguments, environment variables, scripts, or logs. Unencrypted
    archives include file-based credentials and project secrets; explain that
    directly when offering the choice.
-6. `--allow-incomplete` requires the user's acceptance of the concrete missing
+7. `--allow-incomplete` requires the user's acceptance of the concrete missing
    paths/dependencies. It does not bypass permission errors, corrupt databases,
    cloud placeholders, source changes, or the stopped-app check. Never add it merely
    to obtain a successful exit status.
-7. The helper stages files, checks SQLite integrity and source stability, writes a
+8. The helper stages files, checks SQLite integrity and source stability, writes a
    compressed archive with an embedded manifest/helper/restore instructions, and
    verifies file checksums. Report archive path, size, checksum, and completeness.
    Keep the archive's `.sha256` and `.report.json` sidecars when transferring it.
@@ -56,8 +70,15 @@ for command examples, dependencies, path changes, and recovery.
    Run `restore <archive>` to preview destinations, existing data replacements,
    source/destination app versions, and path mappings. Restoration does not merge
    destination databases; it moves existing roots aside and retains rollback data.
+   The preview's `linked_projects` shows each linked project: `clone` (git),
+   `present`, `waiting for <provider> to sync` (cloud), or `conflict` (a
+   different folder is in the way, which blocks restore until it is moved or mapped).
+   Cloning needs access to the remote, e.g. `gh auth login` or an SSH key.
 3. When the user has requested actual restoration and the preview matches that
-   scope, use `restore <archive> --apply` from Terminal. A request to inspect or
+   scope, use `restore <archive> --apply` from Terminal. It clones linked git
+   projects first, then puts local-only files (like `.env`) back into them.
+   If a cloud folder has not synced yet, run `relink <archive>` later to check,
+   and `relink <archive> --apply` to clone repositories that were skipped. A request to inspect or
    preview alone does not authorize replacement. Do not apply a version mismatch
    override without checking compatibility and explaining the concrete mismatch.
 4. Prefer the same macOS short username. For a different home/path, use explicit

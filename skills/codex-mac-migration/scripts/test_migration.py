@@ -254,6 +254,79 @@ class MigrationTests(unittest.TestCase):
         self.assertIn(" M tracked", git("-C", newtree, "status", "--porcelain"))
         self.assertEqual(git("-C", newtree, "rev-parse", "HEAD"), git("-C", repo, "rev-parse", "HEAD"))
 
+    def git(self, *args):
+        cmd = ["git", "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", *map(str, args)]
+        return subprocess.run(cmd, check=True, capture_output=True, text=True).stdout
+
+    def register(self, *paths):
+        state = {"local-projects": {str(i): {"rootPaths": [str(p)]} for i, p in enumerate((self.project,) + paths)}}
+        (self.ch / ".codex-global-state.json").write_text(json.dumps(state))
+
+    def pushed_repo(self):
+        remote = self.base / "remote.git"
+        repo = self.old / "Developer" / "Linked"
+        self.git("init", "--bare", "-b", "main", remote)
+        self.git("init", "-b", "main", repo)
+        (repo / ".gitignore").write_text(".env\nnode_modules/\n")
+        (repo / "app.py").write_text("print('hi')\n")
+        self.git("-C", repo, "add", "-A")
+        self.git("-C", repo, "commit", "-m", "init")
+        self.git("-C", repo, "remote", "add", "origin", remote)
+        self.git("-C", repo, "push", "-u", "origin", "main")
+        (repo / ".env").write_text("SECRET=local-only\n")
+        (repo / "node_modules/pkg").mkdir(parents=True)
+        (repo / "node_modules/pkg/index.js").write_text("rebuildable\n")
+        self.register(repo)
+        return repo, remote
+
+    @unittest.skipUnless(shutil.which("git"), "git is required")
+    def test_pushed_repo_is_linked_and_cloned_on_restore(self):
+        repo, remote = self.pushed_repo()
+        manifest = self.backup()
+        self.assertEqual([x["path"] for x in manifest["linked"] if x["kind"] == "git"], [str(repo)])
+        self.assertNotIn(str(repo), manifest["roots"])
+        self.assertIn(str(repo / ".env"), manifest["roots"])
+        self.assertFalse(any("node_modules" in r for r in manifest["roots"]))
+        self.assertFalse(any(e["name"].endswith("app.py") for e in manifest["entries"]))
+        self.restore()
+        newrepo = self.new / repo.relative_to(self.old)
+        self.assertEqual((newrepo / "app.py").read_text(), "print('hi')\n")
+        self.assertEqual((newrepo / ".env").read_text(), "SECRET=local-only\n")
+        self.assertEqual(self.git("-C", newrepo, "status", "--porcelain"), "")
+        self.assertEqual(self.git("-C", newrepo, "remote", "get-url", "origin").strip(), str(remote))
+        # Rollback moves the fresh clone aside instead of deleting it.
+        with contextlib.redirect_stdout(self.output):
+            m.rollback(argparse.Namespace(journal=str(self.journal()), apply=True))
+        self.assertFalse(newrepo.exists())
+        self.assertTrue(list(newrepo.parent.glob("Linked.after-migration-*")))
+
+    @unittest.skipUnless(shutil.which("git"), "git is required")
+    def test_uncommitted_or_unpushed_repo_is_flagged_and_copied(self):
+        repo, _ = self.pushed_repo()
+        (repo / "app.py").write_text("changed\n")
+        manifest = self.backup()
+        self.assertIn(str(repo), manifest["roots"])
+        self.assertIn("uncommitted", " ".join(manifest["attention"][0]["issues"]))
+        self.git("-C", repo, "commit", "-am", "local only")
+        self.archive = self.base / "archives" / "backup2.tar.gz"
+        manifest = self.backup()
+        self.assertIn("not pushed", " ".join(manifest["attention"][0]["issues"]))
+        self.assertEqual(manifest["attention"][0]["unpushed_branches"], ["main"])
+        self.assertFalse(manifest["linked"])
+
+    def test_cloud_folder_is_linked_not_copied(self):
+        cloud = self.old / "Library/CloudStorage/OneDrive-Test/Objects/House"
+        cloud.mkdir(parents=True)
+        (cloud / "plan.xlsx").write_text("synced by OneDrive")
+        self.register(cloud)
+        manifest = self.backup()
+        self.assertEqual(manifest["linked"], [{"kind": "cloud", "path": str(cloud), "provider": "OneDrive-Test",
+                                               "reasons": ["Registered project"]}])
+        self.assertFalse(any("CloudStorage" in r for r in manifest["roots"]))
+        self.restore()
+        self.assertFalse((self.new / "Library/CloudStorage").exists())
+        self.assertIn("Sign in to OneDrive-Test", self.output.getvalue())
+
     def test_running_app_guard_blocks_backup(self):
         self.guard.stop()
         process = subprocess.CompletedProcess([], 0, stdout="12 /Applications/Codex.app/Contents/MacOS/Codex\n")
