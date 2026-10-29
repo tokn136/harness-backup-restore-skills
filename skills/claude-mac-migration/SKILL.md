@@ -1,9 +1,9 @@
 ---
-name: claude-migrate
+name: claude-mac-migration
 description: Back up all local Claude app and Claude Code data (session history, Code-tab sessions, settings, MCP servers, plugins, skills, plans) into one encrypted archive, and restore it on a new Mac with automatic path fixing. Use for "backup Claude", "move Claude to a new Mac", "migrate Claude", "restore Claude backup", "export Claude sessions".
 ---
 
-# Claude migrate (backup and restore)
+# Claude Mac migration (backup and restore)
 
 Scripts live next to this file: `backup.sh`, `restore.sh`, `manifest.txt`.
 
@@ -19,12 +19,12 @@ Scripts live next to this file: `backup.sh`, `restore.sh`, `manifest.txt`.
 
 ## Backup (old Mac)
 
-1. Run `bash ~/.claude/skills/claude-migrate/backup.sh --dry-run` and show the user what will be included.
+1. Run `bash ~/.claude/skills/claude-mac-migration/backup.sh --dry-run` and show the user what will be included.
 2. The app must be closed during the real backup, and the password prompt needs a real terminal.
    If Claude itself is running inside the app, do NOT run the real backup from the Bash tool.
    Give the user these steps instead:
    - Quit Claude (Cmd+Q)
-   - In Terminal.app run: `bash ~/.claude/skills/claude-migrate/backup.sh`
+   - In Terminal.app run: `bash ~/.claude/skills/claude-mac-migration/backup.sh`
      (options: `--out DIR` (default Desktop), `--no-encrypt`, `--with-ui-state`)
 3. The result is two files: `claude-backup-<date>.tar.gz.enc` and `restore-claude-backup.sh`.
    Both go to the new Mac (AirDrop, USB stick, cloud drive).

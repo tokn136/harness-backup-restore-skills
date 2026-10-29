@@ -4,7 +4,7 @@ Claude skills that back up the local data of AI coding tools into one encrypted 
 
 | Skill | Tool | Status |
 |---|---|---|
-| [`claude-migrate`](skills/claude-migrate/SKILL.md) | Claude desktop app + Claude Code | ✅ Ready |
+| [`claude-mac-migration`](skills/claude-mac-migration/SKILL.md) | Claude desktop app + Claude Code | ✅ Ready |
 | [`codex-mac-migration`](skills/codex-mac-migration/SKILL.md) | Codex desktop app + CLI | ✅ Ready |
 | [`vscode-mac-migration`](skills/vscode-mac-migration/SKILL.md) | VS Code (+ Insiders), Copilot chats, Copilot CLI | ✅ Ready |
 
@@ -36,7 +36,7 @@ The scripts also run on their own:
 
 ```bash
 # Old Mac (quit the app first)
-bash skills/claude-migrate/backup.sh            # --dry-run to preview
+bash skills/claude-mac-migration/backup.sh            # --dry-run to preview
 
 # New Mac (copy both files from the Desktop over)
 bash restore-claude-backup.sh claude-backup-<date>.tar.gz.enc
